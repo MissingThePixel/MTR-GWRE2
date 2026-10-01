@@ -23,4 +23,5 @@ $build = Join-Path $source 'out\build'
 if ($LASTEXITCODE -ne 0) { throw 'Configuration failed. Use an x64 Visual Studio developer shell with Clang 20+.' }
 & cmake --build $build -j $Jobs
 if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
-Write-Host 'Built source/out/build/gw2_recompiled.exe. Run scripts/package-release.ps1 to create a player ZIP.'
+& (Join-Path $root 'launcher\build-launcher.ps1')
+Write-Host 'Built the game and MTR-GWRE2 launcher. Run scripts/package-release.ps1 to create a player ZIP.'

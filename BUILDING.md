@@ -1,6 +1,7 @@
 # Building MTR-GWRE2 on Windows
 
-Use a Developer PowerShell for Visual Studio with the x64 C++ environment.
+Use a Developer PowerShell for Visual Studio with the x64 C++ environment. The
+launcher also requires .NET Framework 4.8 and its included C# compiler.
 Install the Desktop development with C++ workload and Windows SDK, Clang 20+
 (clang-cl), CMake 3.25+, Ninja and Git, available on PATH. Developers need their
 own complete extracted Xbox 360 game (title 584108FF, version 0.0.1.2).
@@ -26,7 +27,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -GameDataRoot "D:\Gam
 Use `-SdkPrefix` for an existing installation of this patched SDK and `-Jobs`
 to set compiler parallelism (default 4). The script creates an ignored local
 manifest, generates game C++ from your own `default.xex`, and compiles
-`source/out/build/gw2_recompiled.exe`. Generated game source is disposable and
+`source/out/build/gw2_recompiled.exe` and `source/out/launcher/MTR-GWRE2.exe`. Generated game source is disposable and
 excluded from Git. `source/generated/rexglue.cmake` is SDK integration boilerplate,
 not translated game instructions.
 
@@ -36,10 +37,14 @@ not translated game instructions.
 powershell -ExecutionPolicy Bypass -File scripts\package-release.ps1
 ```
 
-The explicit file list includes the EXE, runtime DLLs, launchers, README and
+The explicit file list includes the game EXE, runtime DLLs, standalone launcher, README and
 license notices. No extracted game files, saves, caches, logs, diagnostic dumps
 or generated game C++ are copied. The ZIP is created under `dist`.
-`-Executable` and `-RuntimeDirectory` can select already-built binaries.
+`-Executable`, `-LauncherExecutable` and `-RuntimeDirectory` can select already-built binaries.
+
+To build only the launcher, run `launcher/build-launcher.ps1`. The supplied PNG
+is embedded in the EXE and converted to its Windows icon during compilation.
+The launcher starts the game directly and does not run BAT or PowerShell files.
 
 ## Maintained fixes
 

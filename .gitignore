@@ -27,3 +27,6 @@
 *.save
 __pycache__/
 /source/CMakePresets.json
+launcher-settings.json
+launcher-settings.json.tmp
+/launchericon.png

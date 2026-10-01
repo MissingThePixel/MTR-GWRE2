@@ -35,3 +35,9 @@ restriction on modifying or debugging those dependencies.
 
 The MIT license covers new MTR-GWRE2 code only. Original game instructions,
 generated game C++, game assets and trademarks are not relicensed by it.
+
+## Launcher artwork
+
+The launcher uses the Geometry Wars artwork supplied for this project. Game
+artwork and trademarks belong to their respective owners; the project MIT
+license does not grant rights to that artwork.
