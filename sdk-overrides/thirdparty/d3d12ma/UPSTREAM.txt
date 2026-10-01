@@ -1,0 +1,5 @@
+D3D12 Memory Allocator - upstream GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator
+Source: https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator
+Pinned commit: 1d86c1130f61453634b1df85782e1fecfd59a525
+Vendored files: include/D3D12MemAlloc.h, src/D3D12MemAlloc.cpp, LICENSE.txt, NOTICES.txt
+Fetched 2026-10-01. Original sources unmodified. MIT license.
