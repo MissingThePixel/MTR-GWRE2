@@ -1,15 +1,16 @@
 # Building MTR-GWRE2 on Windows
 
-Use a Developer PowerShell for Visual Studio with the x64 C++ environment. The
-launcher also requires .NET Framework 4.8 and its included C# compiler.
-Install the Desktop development with C++ workload and Windows SDK, Clang 20+
-(clang-cl), CMake 3.25+, Ninja and Git, available on PATH. Developers need their
-own complete extracted Xbox 360 game (title 584108FF, version 0.0.1.2).
+Use the x64 Native Tools Command Prompt for Visual Studio. Install the Desktop
+development with C++ workload, Windows SDK, Clang 20+ (clang-cl), CMake 3.25+,
+Ninja, Git and Python 3.10+ on PATH. The launcher requires .NET Framework 4.8
+and its included C# compiler. Players do not need Python or developer tools.
+Developers need their own complete extracted Xbox 360 game (title 584108FF,
+version 0.0.1.2).
 
 ## Build the SDK
 
-```powershell
-powershell -ExecutionPolicy Bypass -File setup-sdk.ps1
+```text
+python setup_sdk.py
 ```
 
 This obtains ReXGlue v0.10.0 at commit
@@ -20,31 +21,42 @@ The same patched runtime is used by MTR-PGR4; do not substitute an unpatched SDK
 
 ## Generate and build the game
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -GameDataRoot "D:\Games\Geometry Wars 2 extracted"
+```text
+python scripts/build.py --game-data-root "D:/Games/Geometry Wars 2 extracted"
 ```
 
-Use `-SdkPrefix` for an existing installation of this patched SDK and `-Jobs`
+Use `--sdk-prefix` for an existing installation of this patched SDK and `--jobs`
 to set compiler parallelism (default 4). The script creates an ignored local
 manifest, generates game C++ from your own `default.xex`, and compiles
-`source/out/build/gw2_recompiled.exe` and `source/out/launcher/MTR-GWRE2.exe`. Generated game source is disposable and
-excluded from Git. `source/generated/rexglue.cmake` is SDK integration boilerplate,
-not translated game instructions.
+`source/out/build/gw2_recompiled.exe` and `source/out/launcher/MTR-GWRE2.exe`.
+Generated game source is disposable and excluded from Git.
+`source/generated/rexglue.cmake` is SDK integration boilerplate, not translated
+game instructions.
 
 ## Package a player release
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\package-release.ps1
+```text
+python scripts/package_release.py
 ```
 
-The explicit file list includes the game EXE, runtime DLLs, standalone launcher, README and
-license notices. No extracted game files, saves, caches, logs, diagnostic dumps
-or generated game C++ are copied. The ZIP is created under `dist`.
-`-Executable`, `-LauncherExecutable` and `-RuntimeDirectory` can select already-built binaries.
+The explicit file list includes the game EXE, runtime DLLs, standalone launcher,
+README and license notices. No extracted game files, saves, caches, logs,
+diagnostic dumps or generated game C++ are copied. The ZIP, separate launcher
+EXE and checksums are created under `dist`. The separate launcher EXE is for
+updating an existing installation; new installations need the complete ZIP.
+Use `--output-directory` to select a fresh release folder.
+`--executable`, `--launcher-executable` and `--runtime-directory` can select
+already-built binaries.
 
-To build only the launcher, run `launcher/build-launcher.ps1`. The supplied PNG
-is embedded in the EXE and converted to its Windows icon during compilation.
-The launcher starts the game directly and does not run BAT or PowerShell files.
+To build only the launcher:
+
+```text
+python launcher/build_launcher.py
+```
+
+The supplied PNG is embedded in the EXE and converted to its Windows icon during
+compilation. The launcher starts the game directly with paths relative to its
+installation folder. It needs no command interpreter or script runner.
 
 ## Maintained fixes
 
@@ -61,6 +73,7 @@ Do not modify original game assets or commit generated game instructions.
 ## Android
 
 See [android/BUILDING.md](android/BUILDING.md) for the ARM64/Vulkan APK build.
-The Android sources live in android/, share the maintained game manifest and
-profile code, and use separate build directories. Use setup-sdk.ps1 -VulkanOnly
-for the Android host code generator, then scripts/build-android.ps1.
+The Android sources live in `android/`, share the maintained game manifest and
+profile code, and use separate build directories. Prepare the Android host code
+generator with `python setup_sdk.py --vulkan-only`, then use
+`python scripts/build_android.py --game-data-root "D:/Games/Geometry Wars 2 extracted"`.

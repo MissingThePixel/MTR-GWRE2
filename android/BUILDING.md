@@ -1,15 +1,15 @@
 # Building MTR-GWRE2 for Android
 
-Use a Windows x64 Visual Studio developer shell with Clang 20+, CMake, Ninja
+Use a Windows x64 Native Tools Command Prompt for Visual Studio with Clang 20+, CMake, Ninja
 and Git, plus the desktop requirements in [../BUILDING.md](../BUILDING.md).
 Supply your own complete extracted Xbox 360 game (title 584108FF, version 0.0.1.2).
 Install Android SDK platform 35, build-tools 35.0.1, NDK 27.2.12479018 and JDK 17.
-Set ANDROID_HOME and JAVA_HOME, or pass -AndroidSdk and -JavaHome to the script.
+Set ANDROID_HOME and JAVA_HOME, or pass --android-sdk and --java-home to the script.
 From the repository root:
 
-```powershell
-./setup-sdk.ps1 -VulkanOnly
-./scripts/build-android.ps1 -GameDataRoot 'D:/Games/Geometry Wars 2 extracted'
+```text
+python setup_sdk.py --vulkan-only
+python scripts/build_android.py --game-data-root "D:/Games/Geometry Wars 2 extracted"
 ```
 
 SDK setup prepares the pinned host SDK and code generator. The Android script
@@ -37,6 +37,6 @@ coherency. Tests are excluded from the APK.
 
 Package an existing release APK with its README and licenses:
 
-```powershell
-./scripts/package-android.ps1
+```text
+python scripts/package_android.py
 ```

@@ -4,7 +4,7 @@
 *.h text eol=lf
 *.cmake text eol=lf
 *.toml text eol=lf
-*.bat text eol=crlf
-*.ps1 text eol=crlf
 
 *.sh text eol=lf
+*.py text eol=lf
+*.cs text eol=lf

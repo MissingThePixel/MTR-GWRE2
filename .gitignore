@@ -10,7 +10,7 @@
 /source/generated/metadata/
 /source/gw2_local.toml
 /source/guest-code.bin
-/source/test-startup.ps1
+/source/test-startup.*
 *.exe
 *.dll
 *.pdb
@@ -44,3 +44,5 @@ launcher-settings.json.tmp
 *.apk
 *.jks
 *.keystore
+
+/MTR-GWRE2-Android-Vulkan/
