@@ -30,3 +30,17 @@ __pycache__/
 launcher-settings.json
 launcher-settings.json.tmp
 /launchericon.png
+
+# Android build outputs and private development data
+/sdk-install-vulkan/
+/android/out/
+/android/tools/
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/app/src/main/jniLibs/
+/android/local.properties
+/android/logs/
+*.apk
+*.jks
+*.keystore

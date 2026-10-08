@@ -1,8 +1,10 @@
 * text=auto
-*.patch text eol=lf
+*.patch text eol=lf whitespace=-blank-at-eol
 *.cpp text eol=lf
 *.h text eol=lf
 *.cmake text eol=lf
 *.toml text eol=lf
 *.bat text eol=crlf
 *.ps1 text eol=crlf
+
+*.sh text eol=lf

@@ -41,3 +41,11 @@ generated game C++, game assets and trademarks are not relicensed by it.
 The launcher uses the Geometry Wars artwork supplied for this project. Game
 artwork and trademarks belong to their respective owners; the project MIT
 license does not grant rights to that artwork.
+
+## Android
+
+The Android port uses the same pinned ReXGlue SDK and shared game source, with
+maintained ARM64 and Vulkan patches in patches/. SDL3 supplies the Android Java
+bridge under its zlib license. The Gradle wrapper is Apache 2.0; its notice is in
+LICENSES/Gradle-LICENSE.txt. The Vulkan patches correct texture-brightness decoding
+and presentation pipeline caching. Game instructions and assets remain excluded.

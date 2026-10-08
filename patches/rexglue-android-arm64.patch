@@ -1,0 +1,1058 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -12,6 +12,10 @@
+     LANGUAGES ${REXGLUE_LANGUAGES}
+     DESCRIPTION "Xbox 360 Recompilation SDK"
+ )
++if(ANDROID)
++    enable_language(ASM)
++endif()
++
+ # Floor only: bump MAJOR.MINOR for API changes. Patch is derived from git tags
+ # in cmake/rex_version.cmake. See docs/RELEASING.md.
+ 
+@@ -128,6 +132,12 @@
+     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+ endif()
+ 
++# Android NDK libc++ gates stop_token/jthread behind this feature flag.
++if(ANDROID)
++    add_compile_options(-fexperimental-library)
++    add_link_options(-fexperimental-library)
++endif()
++
+ # Global compile options
+ add_compile_options(
+     -fno-strict-aliasing
+@@ -158,6 +168,9 @@
+         message(FATAL_ERROR "Unsupported Windows architecture: ${REX_TARGET_PROCESSOR}")
+     endif()
+     add_compile_definitions(REX_PLATFORM_WINDOWS=1)
++elseif(ANDROID)
++    set(REX_PLATFORM "android-arm64")
++    add_compile_definitions(REX_PLATFORM_ANDROID=1)
+ elseif(UNIX AND NOT APPLE)
+     if(REX_TARGET_PROCESSOR MATCHES "AMD64|x86_64")
+         set(REX_PLATFORM "linux-amd64")
+--- a/include/rex/chrono/chrono.h
++++ b/include/rex/chrono/chrono.h
+@@ -116,7 +116,7 @@
+ 
+ namespace std::chrono {
+ 
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__ANDROID__)
+ // Apple libc++ does not expose clock_time_conversion or clock_cast.
+ template <class, class>
+ struct clock_time_conversion {};
+--- a/include/rex/string/numeric.h
++++ b/include/rex/string/numeric.h
+@@ -26,7 +26,7 @@
+ #include <rex/string/utf8.h>
+ #include <rex/vec128.h>
+ 
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_ANDROID
+ #include <locale.h>
+ #endif
+ 
+@@ -114,7 +114,7 @@
+   return result;
+ }
+ 
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_ANDROID
+ template <typename T>
+ inline std::from_chars_result portable_float_from_chars(const char* first, const char* last,
+                                                         T& value) {
+@@ -189,7 +189,7 @@
+     }
+     std::memcpy(&result, &pun, sizeof(PUN));
+   } else {
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_ANDROID
+     auto [p, error] = portable_float_from_chars(range.data(), range.data() + range.size(), result);
+ #else
+     auto [p, error] = std::from_chars(range.data(), range.data() + range.size(), result,
+@@ -316,7 +316,7 @@
+         assert_always();
+         return vec128_t();
+       }
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_ANDROID
+       auto result = detail::portable_float_from_chars(p, end, v.f32[i]);
+ #else
+       auto result = std::from_chars(p, end, v.f32[i], std::chars_format::general);
+--- a/include/rex/system/mmio_handler.h
++++ b/include/rex/system/mmio_handler.h
+@@ -59,6 +59,12 @@
+                                               void* access_violation_callback_context);
+   static MMIOHandler* global_handler();
+ 
++  // Optional tracked-write handler, invoked under the global lock before a
++  // host protection query. False falls back to the ordinary race check.
++  void SetTrackedWriteCallback(AccessViolationCallback callback) {
++    tracked_write_callback_ = callback;
++  }
++
+   bool RegisterRange(uint32_t virtual_address, uint32_t mask, uint32_t size, void* context,
+                      MMIOReadCallback read_callback, MMIOWriteCallback write_callback);
+   MMIORange* LookupRange(uint32_t virtual_address);
+@@ -85,6 +91,7 @@
+   const void* host_to_guest_virtual_context_;
+ 
+   AccessViolationCallback access_violation_callback_;
++  AccessViolationCallback tracked_write_callback_ = nullptr;
+   void* access_violation_callback_context_;
+ 
+   static MMIOHandler* global_handler_;
+--- a/include/rex/system/xmemory.h
++++ b/include/rex/system/xmemory.h
+@@ -320,6 +320,11 @@
+                         uint32_t virtual_address, uint32_t length, bool is_write,
+                         bool unwatch_exact_range, bool unprotect = true);
+ 
++  // Resolve an active write watch or a stale concurrent fault on a committed
++  // writable page, retaining the global lock throughout the metadata check.
++  bool HandleTrackedWriteFault(rex::thread::global_unique_lock_type lock,
++                                uint32_t virtual_address);
++
+   uint32_t GetPhysicalAddress(uint32_t address) const;
+ 
+  protected:
+--- a/include/rex/thread/fiber.h
++++ b/include/rex/thread/fiber.h
+@@ -20,7 +20,9 @@
+ // before including <ucontext.h>.
+ #define _XOPEN_SOURCE 700
+ #endif
++#if !REX_PLATFORM_ANDROID
+ #include <ucontext.h>
++#endif
+ #include <cstdint>
+ #include <vector>
+ #endif
+@@ -57,7 +59,11 @@
+   void* handle_ = nullptr;
+   bool is_thread_fiber_ = false;
+ #elif REX_PLATFORM_LINUX || REX_PLATFORM_MAC
++#if REX_PLATFORM_ANDROID
++  alignas(16) uint64_t context_[24]{};
++#else
+   ucontext_t context_{};
++#endif
+   std::vector<uint8_t> stack_;
+   void (*entry_)(void*) = nullptr;
+   void* arg_ = nullptr;
+--- a/src/core/CMakeLists.txt
++++ b/src/core/CMakeLists.txt
+@@ -63,7 +63,6 @@
+         dynlib_posix.cpp
+         exception_handler_posix.cpp
+         filesystem_posix.cpp
+-        fiber_posix.cpp
+         mapped_memory_posix.cpp
+         math_gcc.cpp
+         memory_posix.cpp
+@@ -74,6 +73,13 @@
+         system_posix.cpp
+         threading_posix.cpp
+     )
++endif()
++
++if(ANDROID)
++    target_sources(rexcore PRIVATE fiber_android.cpp fiber_android_arm64.S filesystem_android.cpp)
++    target_link_libraries(rexcore PRIVATE SDL3::SDL3)
++elseif(UNIX)
++    target_sources(rexcore PRIVATE fiber_posix.cpp)
+ endif()
+ 
+ # Xenos data-format layer (stateless; headers under include/rex/graphics/).
+@@ -100,6 +106,8 @@
+ 
+ if(APPLE)
+     target_link_libraries(rexcore PRIVATE pthread)
++elseif(ANDROID)
++    target_link_libraries(rexcore PRIVATE android log dl)
+ elseif(UNIX)
+     target_link_libraries(rexcore PRIVATE pthread rt dl)
+ endif()
+--- a/src/core/memory_posix.cpp
++++ b/src/core/memory_posix.cpp
+@@ -52,6 +52,7 @@
+ #include <sys/ioctl.h>
+ 
+ #include <linux/ashmem.h>
++#include <rex/main_android.h>
+ 
+ // TODO(tomc): Android or maybe na. idk
+ // #include "xenia/base/main_android.h"
+--- a/src/core/threading_posix.cpp
++++ b/src/core/threading_posix.cpp
+@@ -270,7 +270,7 @@
+ class PosixConditionBase {
+  public:
+   PosixConditionBase() {
+-#if REX_PLATFORM_LINUX
++#if REX_PLATFORM_GNU_LINUX
+     // Use robust mutexes so waits can recover if owner thread terminates.
+     pthread_mutexattr_t attr;
+     if (pthread_mutexattr_init(&attr) == 0) {
+@@ -290,7 +290,7 @@
+   WaitResult Wait(std::chrono::milliseconds timeout) {
+     bool executed;
+     auto predicate = [this] { return this->signaled(); };
+-#if REX_PLATFORM_LINUX
++#if REX_PLATFORM_GNU_LINUX
+     auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());
+     int lock_result = pthread_mutex_lock(native_mutex);
+     if (lock_result == EOWNERDEAD) {
+@@ -344,7 +344,7 @@
+       locks.reserve(handles.size());
+ 
+       for (size_t i = 0; i < handles.size(); ++i) {
+-#if REX_PLATFORM_LINUX
++#if REX_PLATFORM_GNU_LINUX
+         auto native_mutex = static_cast<pthread_mutex_t*>(handles[i]->mutex_.native_handle());
+         int result = pthread_mutex_trylock(native_mutex);
+         if (result == 0 || result == EOWNERDEAD) {
+@@ -414,9 +414,8 @@
+       if (timeout == std::chrono::milliseconds::max()) {
+         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+       } else {
+-        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
+-        auto sleep_time = std::min(remaining, std::chrono::milliseconds(1));
+-        std::this_thread::sleep_for(sleep_time);
++        // Keep sub-millisecond precision so the final polling interval cannot spin.
++        std::this_thread::sleep_until(std::min(end_time, now + std::chrono::milliseconds(1)));
+       }
+     }
+   }
+--- a/src/graphics/shared_memory.cpp
++++ b/src/graphics/shared_memory.cpp
+@@ -11,6 +11,8 @@
+ 
+ #include <algorithm>
+ #include <bit>
++#include <chrono>
++#include <rex/cvar.h>
+ #include <cstring>
+ #include <span>
+ #include <utility>
+@@ -20,7 +22,10 @@
+ #include <rex/dbg.h>
+ #include <rex/graphics/shared_memory.h>
+ #include <rex/math.h>
++#include <rex/logging.h>
+ #include <rex/memory.h>
++
++REXCVAR_DECLARE(bool, gpu_command_stats);
+ 
+ namespace rex::graphics {
+ 
+@@ -535,8 +540,19 @@
+   uint32_t block_last = page_last >> 6;
+   uint32_t range_start = UINT32_MAX;
+   upload_ranges_.clear();
++  using Clock = std::chrono::steady_clock;
++  const bool diagnostic = REXCVAR_GET(gpu_command_stats);
++  struct LockStats {
++    Clock::time_point start = Clock::now();
++    double wait_ms = 0.0, scan_ms = 0.0;
++    uint64_t requests = 0;
++  };
++  static thread_local LockStats stats;
++  const auto wait_start = diagnostic ? Clock::now() : Clock::time_point{};
+   {
+     auto global_lock = global_critical_region_.Acquire();
++    const auto scan_start = diagnostic ? Clock::now() : Clock::time_point{};
++    if (diagnostic) stats.wait_ms += std::chrono::duration<double, std::milli>(scan_start - wait_start).count();
+     for (uint32_t block = block_first; block <= block_last; ++block) {
+       uint64_t valid = system_page_flags_valid_[block];
+       if (block == block_first) {
+@@ -581,6 +597,15 @@
+         upload_ranges_.emplace_back(range_start, range_end - range_start);
+       }
+     }
++    if (diagnostic) {
++      const auto now = Clock::now();
++      stats.scan_ms += std::chrono::duration<double, std::milli>(now - scan_start).count();
++      ++stats.requests;
++      if (now - stats.start >= std::chrono::seconds(5)) {
++        REXGPU_INFO("Shared memory lock costs: requests={}, wait={:.1f} ms, scan={:.1f} ms", stats.requests, stats.wait_ms, stats.scan_ms);
++        stats = LockStats{};
++      }
++    }
+   }
+   if (upload_ranges_.empty()) {
+     ++range_stats.ready;
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -12,6 +12,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <cstdint>
++#include <chrono>
+ #include <cstring>
+ #include <iterator>
+ #include <mutex>
+@@ -46,6 +47,8 @@
+ #include <rex/ui/vulkan/presenter.h>
+ #include <rex/ui/vulkan/util.h>
+ 
++REXCVAR_DECLARE(bool, gpu_command_stats);
++
+ // Legacy backend compatibility aliases for shared readback controls.
+ REXCVAR_DEFINE_BOOL(vulkan_readback_resolve, false, "GPU/Vulkan",
+                     "Read render-to-texture results on the CPU")
+@@ -72,6 +75,48 @@
+ namespace rex::graphics::vulkan {
+ 
+ namespace {
++
++// Diagnostic CPU wall times; disabled during normal warning-only launches.
++enum class VulkanCpuPhase { Draw, Copy, Swap, Replay, Submit, Textures, Targets, Primitives, Bindings, Ranges, Pipeline, Count };
++class VulkanCpuTimingScope {
++ public:
++  explicit VulkanCpuTimingScope(VulkanCpuPhase phase)
++      : phase_(phase), enabled_(REXCVAR_GET(gpu_command_stats)),
++        start_(enabled_ ? Clock::now() : Clock::time_point{}) {}
++  ~VulkanCpuTimingScope() {
++    if (!enabled_) return;
++    struct Window {
++      Clock::time_point start = Clock::now();
++      std::array<double, size_t(VulkanCpuPhase::Count)> times{};
++      std::array<uint64_t, size_t(VulkanCpuPhase::Count)> counts{};
++    };
++    static thread_local Window window;
++    const auto now = Clock::now();
++    window.times[size_t(phase_)] += std::chrono::duration<double, std::milli>(now - start_).count();
++    ++window.counts[size_t(phase_)];
++    if (phase_ == VulkanCpuPhase::Swap && now - window.start >= std::chrono::seconds(5)) {
++      REXGPU_INFO("Vulkan CPU spans: draws={} draw={:.1f} ms, copies={} copy={:.1f} ms, swaps={} swap={:.1f} ms, replay={:.1f} ms, submit={:.1f} ms",
++                  window.counts[0], window.times[0], window.counts[1], window.times[1],
++                  window.counts[2], window.times[2], window.times[3], window.times[4]);
++      REXGPU_INFO("Vulkan draw stages: textures={:.1f} ms, targets={:.1f} ms, primitives={:.1f} ms",
++                  window.times[5], window.times[6], window.times[7]);
++      REXGPU_INFO("Vulkan draw remainder: bindings={:.1f} ms, ranges={:.1f} ms, pipeline={:.1f} ms",
++                  window.times[8], window.times[9], window.times[10]);
++      window = Window{};
++    }
++  }
++ private:
++  using Clock = std::chrono::steady_clock;
++  VulkanCpuPhase phase_;
++  bool enabled_;
++  Clock::time_point start_;
++};
++
++template <typename F>
++decltype(auto) MeasureVulkanCpu(VulkanCpuPhase phase, F&& call) {
++  VulkanCpuTimingScope timing(phase);
++  return call();
++}
+ 
+ // glslang default built-in resource limits.
+ constexpr TBuiltInResource kGlslangDefaultTBuiltInResource = {
+@@ -930,10 +975,11 @@
+     return false;
+   }
+   if (!device_properties.vertexPipelineStoresAndAtomics) {
+-    REXGPU_ERROR(
+-        "Vulkan vertexPipelineStoresAndAtomics is required for GPU emulation and "
+-        "D3D12 parity, but unsupported by the selected device");
+-    return false;
++    if (REXCVAR_GET(vulkan_require_vertex_pipeline_stores_and_atomics)) {
++      REXGPU_ERROR("Vulkan vertexPipelineStoresAndAtomics is required by the current configuration");
++      return false;
++    }
++    REXGPU_WARN("Vulkan read-only vertex compatibility test: vertex memory-export draws remain unsupported and guarded");
+   }
+   if (!device_properties.geometryShader) {
+     if (REXCVAR_GET(vulkan_require_geometry_shader)) {
+@@ -2271,6 +2317,7 @@
+ 
+ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                                        uint32_t frontbuffer_height) {
++  VulkanCpuTimingScope diagnostic_timing(VulkanCpuPhase::Swap);
+   SCOPE_profile_cpu_f("gpu");
+   vertex_buffers_in_sync_[0] = 0;
+   vertex_buffers_in_sync_[1] = 0;
+@@ -3590,6 +3637,7 @@
+ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
+                                        IndexBufferInfo* index_buffer_info,
+                                        bool major_mode_explicit) {
++  VulkanCpuTimingScope diagnostic_timing(VulkanCpuPhase::Draw);
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+@@ -3708,7 +3756,7 @@
+     }
+ 
+     // Process primitives.
+-    if (!primitive_processor_->Process(primitive_processing_result)) {
++    if (!MeasureVulkanCpu(VulkanCpuPhase::Primitives, [&] { return primitive_processor_->Process(primitive_processing_result); })) {
+       return draw_fail("primitive_processing");
+     }
+     if (!primitive_processing_result.host_draw_vertex_count) {
+@@ -3835,12 +3883,12 @@
+   uint32_t used_texture_mask =
+       vertex_shader->GetUsedTextureMaskAfterTranslation() |
+       (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
+-  texture_cache_->RequestTextures(used_texture_mask);
++  MeasureVulkanCpu(VulkanCpuPhase::Textures, [&] { texture_cache_->RequestTextures(used_texture_mask); });
+ 
+   const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
+   // Set up the render targets - this may perform dispatches and draws.
+-  if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
+-                                    normalized_color_mask, *vertex_shader)) {
++  if (!MeasureVulkanCpu(VulkanCpuPhase::Targets, [&] { return render_target_cache_->Update(
++          is_rasterization_done, normalized_depth_control, normalized_color_mask, *vertex_shader); })) {
+     return draw_fail("render_target_update");
+   }
+ 
+@@ -3849,11 +3897,11 @@
+   // textures.
+   VkPipeline pipeline;
+   void* pipeline_handle = nullptr;
+-  if (!pipeline_cache_->ConfigurePipeline(vertex_shader_translation, pixel_shader_translation,
+-                                          primitive_processing_result, normalized_depth_control,
+-                                          normalized_color_mask,
+-                                          render_target_cache_->last_update_render_pass_key(),
+-                                          pipeline, pipeline_layout_provider, &pipeline_handle)) {
++  if (!MeasureVulkanCpu(VulkanCpuPhase::Pipeline, [&] { return pipeline_cache_->ConfigurePipeline(
++          vertex_shader_translation, pixel_shader_translation, primitive_processing_result,
++          normalized_depth_control, normalized_color_mask,
++          render_target_cache_->last_update_render_pass_key(), pipeline, pipeline_layout_provider,
++          &pipeline_handle); })) {
+     return draw_fail("configure_pipeline");
+   }
+   bool pipeline_is_placeholder = false;
+@@ -3973,7 +4021,7 @@
+ 
+   // Update uniform buffers and descriptor sets after binding the pipeline with
+   // the new layout.
+-  if (!UpdateBindings(vertex_shader, pixel_shader)) {
++  if (!MeasureVulkanCpu(VulkanCpuPhase::Bindings, [&] { return UpdateBindings(vertex_shader, pixel_shader); })) {
+     return draw_fail("update_bindings");
+   }
+ 
+@@ -4014,7 +4062,7 @@
+         vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
+         continue;
+       }
+-      if (!shared_memory_->RequestRange(vfetch_constant.address << 2, vfetch_constant.size << 2)) {
++      if (!MeasureVulkanCpu(VulkanCpuPhase::Ranges, [&] { return shared_memory_->RequestRange(vfetch_constant.address << 2, vfetch_constant.size << 2); })) {
+         REXGPU_ERROR(
+             "Failed to request vertex buffer at 0x{:08X} (size {}) in the shared "
+             "memory",
+@@ -4382,6 +4430,7 @@
+ }
+ 
+ bool VulkanCommandProcessor::IssueCopy() {
++  VulkanCpuTimingScope diagnostic_timing(VulkanCpuPhase::Copy);
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+@@ -4970,9 +5019,27 @@
+     // defined by vkQueueSubmit additionally include in the first
+     // synchronization scope all commands that occur earlier in submission
+     // order."
++    const bool collect_wait_stats = REXCVAR_GET(gpu_command_stats);
++    const auto wait_start = collect_wait_stats ? std::chrono::steady_clock::now()
++                                              : std::chrono::steady_clock::time_point{};
+     VkResult wait_result =
+         dfn.vkWaitForFences(device, uint32_t(await_submission - submission_completed_),
+                             submissions_in_flight_fences_.data(), VK_TRUE, UINT64_MAX);
++    if (collect_wait_stats) {
++      using Clock = std::chrono::steady_clock;
++      static thread_local auto window_start = Clock::now();
++      static thread_local double total_ms = 0.0, max_ms = 0.0;
++      static thread_local uint64_t count = 0;
++      const auto now = Clock::now();
++      const double elapsed_ms = std::chrono::duration<double, std::milli>(now - wait_start).count();
++      total_ms += elapsed_ms;
++      max_ms = std::max(max_ms, elapsed_ms);
++      ++count;
++      if (now - window_start >= std::chrono::seconds(5)) {
++        REXGPU_INFO("Vulkan completion waits: count={}, total={:.1f} ms, max={:.1f} ms", count, total_ms, max_ms);
++        window_start = now; total_ms = max_ms = 0.0; count = 0;
++      }
++    }
+     if (wait_result == VK_SUCCESS) {
+       fences_awaited += await_submission - submission_completed_;
+     } else {
+@@ -5385,7 +5452,10 @@
+       REXGPU_ERROR("Failed to begin a Vulkan command buffer");
+       return false;
+     }
+-    deferred_command_buffer_.Execute(command_buffer.buffer);
++    {
++      VulkanCpuTimingScope diagnostic_timing(VulkanCpuPhase::Replay);
++      deferred_command_buffer_.Execute(command_buffer.buffer);
++    }
+     if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
+       REXGPU_ERROR("Failed to end a Vulkan command buffer");
+       return false;
+@@ -5417,6 +5487,7 @@
+     {
+       ui::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
+           vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
++      VulkanCpuTimingScope diagnostic_timing(VulkanCpuPhase::Submit);
+       submit_result = dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, fence);
+     }
+     if (submit_result != VK_SUCCESS) {
+--- a/src/graphics/vulkan/shared_memory.cpp
++++ b/src/graphics/vulkan/shared_memory.cpp
+@@ -10,7 +10,9 @@
+  */
+ 
+ #include <algorithm>
++#include <array>
+ #include <cstring>
++#include <chrono>
+ #include <utility>
+ #include <vector>
+ 
+@@ -22,6 +24,8 @@
+ #include <rex/logging.h>
+ #include <rex/math.h>
+ #include <rex/ui/vulkan/util.h>
++
++REXCVAR_DECLARE(bool, gpu_command_stats);
+ 
+ REXCVAR_DEFINE_BOOL(vulkan_sparse_shared_memory, true, "GPU/Vulkan",
+                     "Use sparse shared memory on Vulkan")
+@@ -273,6 +277,16 @@
+   if (upload_page_ranges.empty()) {
+     return true;
+   }
++  using DiagnosticClock = std::chrono::steady_clock;
++  const bool diagnostic = REXCVAR_GET(gpu_command_stats);
++  struct UploadStats {
++    DiagnosticClock::time_point start = DiagnosticClock::now();
++    double allocation_ms = 0.0, watch_ms = 0.0, copy_ms = 0.0;
++    uint64_t bytes = 0, chunks = 0;
++    uint64_t large_bytes = 0, large_chunks = 0, max_chunk = 0;
++    std::array<uint64_t, 128> region_bytes{};
++  };
++  static thread_local UploadStats stats;
+   // upload_page_ranges are sorted, use them to determine the range for the
+   // ordering barrier.
+   Use(Usage::kTransferDestination,
+@@ -292,6 +306,7 @@
+     while (upload_range_length) {
+       VkBuffer upload_buffer;
+       VkDeviceSize upload_buffer_offset, upload_buffer_size;
++      const auto allocation_start = diagnostic ? DiagnosticClock::now() : DiagnosticClock::time_point{};
+       uint8_t* upload_buffer_mapping = upload_buffer_pool_->RequestPartial(
+           submission_current, upload_range_length << page_size_log2(),
+           size_t(1) << page_size_log2(), upload_buffer, upload_buffer_offset, upload_buffer_size);
+@@ -300,10 +315,49 @@
+         successful = false;
+         break;
+       }
++      const auto watch_start = diagnostic ? DiagnosticClock::now() : DiagnosticClock::time_point{};
+       MakeRangeValid(upload_range_start << page_size_log2(), uint32_t(upload_buffer_size), false);
++      const auto copy_start = diagnostic ? DiagnosticClock::now() : DiagnosticClock::time_point{};
+       std::memcpy(upload_buffer_mapping,
+                   memory().TranslatePhysical(upload_range_start << page_size_log2()),
+                   upload_buffer_size);
++      if (diagnostic) {
++        const auto now = DiagnosticClock::now();
++        stats.allocation_ms += std::chrono::duration<double, std::milli>(watch_start - allocation_start).count();
++        stats.watch_ms += std::chrono::duration<double, std::milli>(copy_start - watch_start).count();
++        stats.copy_ms += std::chrono::duration<double, std::milli>(now - copy_start).count();
++        stats.bytes += upload_buffer_size; ++stats.chunks;
++        stats.max_chunk = std::max(stats.max_chunk, uint64_t(upload_buffer_size));
++        if (upload_buffer_size >= 1048576) {
++          stats.large_bytes += upload_buffer_size; ++stats.large_chunks;
++        }
++        // Diagnostic only: split uploads into 4 MB physical regions so the
++        // report identifies the buffers responsible without logging each draw.
++        uint64_t region_start = uint64_t(upload_range_start) << page_size_log2();
++        uint64_t region_end = region_start + upload_buffer_size;
++        while (region_start < region_end) {
++          uint32_t region = uint32_t(region_start >> 22);
++          uint64_t next = std::min(region_end, (uint64_t(region) + 1) << 22);
++          stats.region_bytes[region] += next - region_start;
++          region_start = next;
++        }
++        if (now - stats.start >= std::chrono::seconds(5)) {
++          REXGPU_INFO("Vulkan upload costs: chunks={}, MB={:.1f}, allocation={:.1f} ms, watch={:.1f} ms, memcpy={:.1f} ms",
++                      stats.chunks, double(stats.bytes) / 1048576.0, stats.allocation_ms, stats.watch_ms, stats.copy_ms);
++          REXGPU_INFO("Vulkan upload distribution: >=1MB_chunks={}, >=1MB_total={:.1f} MB, largest_chunk={:.1f} KB",
++                      stats.large_chunks, double(stats.large_bytes) / 1048576.0,
++                      double(stats.max_chunk) / 1024.0);
++          for (uint32_t rank = 0; rank < 4; ++rank) {
++            auto largest = std::max_element(stats.region_bytes.begin(), stats.region_bytes.end());
++            if (!*largest) break;
++            const uint32_t region = uint32_t(largest - stats.region_bytes.begin());
++            REXGPU_INFO("Vulkan upload region: rank={}, address=0x{:08X}, MB={:.1f}",
++                        rank + 1, region << 22, double(*largest) / 1048576.0);
++            *largest = 0;
++          }
++          stats = UploadStats{};
++        }
++      }
+       if (upload_buffer_previous != upload_buffer && !upload_regions_.empty()) {
+         assert_true(upload_buffer_previous != VK_NULL_HANDLE);
+         command_buffer.CmdVkCopyBuffer(upload_buffer_previous, buffer_,
+--- a/src/system/gpu_plugin_loader.cpp
++++ b/src/system/gpu_plugin_loader.cpp
+@@ -55,8 +55,13 @@
+ }  // namespace
+ 
+ std::unique_ptr<IGraphicsSystem> LoadGpuPlugin(std::string_view name, std::string_view backend) {
++#if REX_PLATFORM_ANDROID
++  // Resolve through Android app native-library search paths, not app_process.
++  std::filesystem::path path = PluginFileName(name);
++#else
+   auto path = rex::filesystem::GetExecutableFolder() / PluginFileName(name);
+-  if (!std::filesystem::exists(path)) {
++#endif
++  if (!REX_PLATFORM_ANDROID && !std::filesystem::exists(path)) {
+     REXSYS_ERROR(
+         "GPU plugin '{}' not found at {}. Stage it next to the executable "
+         "(GPU_PLUGINS {} in rexglue_configure_target).",
+--- a/src/system/mmio_handler.cpp
++++ b/src/system/mmio_handler.cpp
+@@ -406,6 +406,16 @@
+     // clears the watch we just hit).
+     // Do this under the lock so we don't introduce another race condition.
+     auto lock = global_critical_region_.Acquire();
++    if (is_write && tracked_write_callback_) {
++      // A tracked physical write can be resolved from the existing page
++      // metadata. Avoid scanning /proc/self/maps while all guest and renderer
++      // threads wait on this lock. Untracked/stale faults retain the host query.
++      if (tracked_write_callback_(std::move(lock), access_violation_callback_context_,
++                                  fault_host_address, is_write)) {
++        return true;
++      }
++      lock = global_critical_region_.Acquire();
++    }
+     memory::PageAccess cur_access;
+     size_t page_length = memory::page_size();
+     memory::QueryProtect(fault_host_address, page_length, cur_access);
+--- a/src/system/xmemory.cpp
++++ b/src/system/xmemory.cpp
+@@ -238,6 +238,25 @@
+     assert_always();
+     return false;
+   }
++#if REX_PLATFORM_ANDROID
++  mmio_handler_->SetTrackedWriteCallback(
++      [](rex::thread::global_unique_lock_type lock, void* context,
++         void* host_address, bool is_write) -> bool {
++        auto* memory = static_cast<Memory*>(context);
++        const auto address = reinterpret_cast<uintptr_t>(host_address);
++        if (!is_write || address < reinterpret_cast<uintptr_t>(memory->virtual_membase_) ||
++            address >= reinterpret_cast<uintptr_t>(memory->physical_membase_)) {
++          return false;
++        }
++        const uint32_t guest_address = memory->HostToGuestVirtual(host_address);
++        BaseHeap* heap = memory->LookupHeap(guest_address);
++        if (!heap || heap->heap_type() != memory::HeapType::kGuestPhysical) return false;
++        // TriggerCallbacks checks watch bits, invalidates GPU copies and restores
++        // protection exactly as in the ordinary access-violation callback.
++        return static_cast<PhysicalHeap*>(heap)->HandleTrackedWriteFault(
++            std::move(lock), guest_address);
++      });
++#endif
+   REXSYS_DEBUG("Installed MMIO handler for physical address translation");
+ 
+   // ?
+@@ -2179,6 +2198,37 @@
+   }
+ }
+ 
++bool PhysicalHeap::HandleTrackedWriteFault(
++    rex::thread::global_unique_lock_type lock, uint32_t virtual_address) {
++  if (virtual_address < heap_base_ || virtual_address - heap_base_ >= heap_size_) {
++    return false;
++  }
++  const uint32_t system_page =
++      (virtual_address - heap_base_ + host_address_offset()) / system_page_size_;
++  if (system_page >= system_page_count_) return false;
++  if (IsHostPageWriteWatched(system_page)) {
++    return TriggerCallbacks(std::move(lock), virtual_address, 1, true, false);
++  }
++  // Another thread may already have cleared the same write watch. Check every
++  // guest page sharing the host page before restoring write access; a genuine
++  // read-only, decommitted or unreserved page must use the original fault path.
++  const uint32_t first =
++      rex::sat_sub(system_page * system_page_size_, host_address_offset()) >> page_size_shift_;
++  const uint32_t last =
++      rex::sat_sub((system_page + 1) * system_page_size_ - 1, host_address_offset()) >> page_size_shift_;
++  if (last >= page_table_.size()) return false;
++  std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
++  for (uint32_t page = first; page <= last; ++page) {
++    const auto& entry = page_table_[page];
++    if (!(entry.state & memory::kMemoryAllocationCommit) ||
++        ToPageAccess(entry.current_protect) != rex::memory::PageAccess::kReadWrite) {
++      return false;
++    }
++  }
++  return rex::memory::Protect(membase_ + heap_base_ + system_page * system_page_size_,
++                              system_page_size_, rex::memory::PageAccess::kReadWrite);
++}
++
+ bool PhysicalHeap::TriggerCallbacks(rex::thread::global_unique_lock_type global_lock_locked_once,
+                                     uint32_t virtual_address, uint32_t length, bool is_write,
+                                     bool unwatch_exact_range, bool unprotect) {
+--- a/src/ui/CMakeLists.txt
++++ b/src/ui/CMakeLists.txt
+@@ -68,6 +68,8 @@
+     set(REXUI_PLATFORM_SOURCES
+         surface_win.cpp
+     )
++elseif(ANDROID)
++    set(REXUI_PLATFORM_SOURCES surface_android.cpp)
+ elseif(APPLE)
+     set(REXUI_PLATFORM_SOURCES
+         surface_mac.cpp
+@@ -146,7 +148,7 @@
+ endif()
+ 
+ # Platform-specific dependencies
+-if(UNIX AND NOT APPLE)
++if(UNIX AND NOT APPLE AND NOT ANDROID)
+     find_package(PkgConfig REQUIRED)
+     pkg_check_modules(X11_XCB REQUIRED x11-xcb)
+     # Required, not optional: vulkan/api.h pulls in <wayland-client.h> on every
+--- a/src/ui/rex_app.cpp
++++ b/src/ui/rex_app.cpp
+@@ -171,6 +171,15 @@
+     log_config.log_dir = (exe_dir / "logs").string();
+   }
+ 
++#if REX_PLATFORM_ANDROID
++  // A quiet Android release must not create an empty rotating log file either.
++  if (log_config.default_level == spdlog::level::off) {
++    log_config.log_file = nullptr;
++    log_config.app_name.clear();
++    log_config.category_levels.clear();
++  }
++#endif
++
+   rex::InitLogging(log_config);
+   rex::RegisterLogLevelCallback();
+ 
+@@ -602,8 +611,15 @@
+     window_->RemoveInputListener(this);
+     window_->RemoveListener(this);
+   }
++#if REX_PLATFORM_ANDROID
++  // Input drivers remove their listeners during runtime destruction. Keep
++  // their window alive until they have detached, including Android quit paths.
++  runtime_.reset();
++  window_.reset();
++#else
+   window_.reset();
+   runtime_.reset();
++#endif
+ }
+ 
+ void ReXApp::SetGuestFrameStats(ui::DebugOverlayDialog::FrameStatsProvider provider) {
+--- a/src/ui/vulkan/vulkan_device.cpp
++++ b/src/ui/vulkan/vulkan_device.cpp
+@@ -27,8 +27,8 @@
+                     "required for Vulkan GPU emulation")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ REXCVAR_DEFINE_BOOL(vulkan_require_vertex_pipeline_stores_and_atomics, true, "UI/Vulkan",
+-                    "Deprecated and ignored for parity; vertexPipelineStoresAndAtomics is always "
+-                    "required for Vulkan GPU emulation")
++                    "Require vertex-stage memory stores at device selection; when disabled, "
++                    "draws using vertex memory export still require hardware support")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ // Apple Silicon / MoltenVK does not expose geometryShader or fillModeNonSolid;
+ // default both to false on macOS so the device can still be selected.
+@@ -93,6 +93,10 @@
+   ifn.vkGetPhysicalDeviceFeatures(physical_device, &supported_features);
+ 
+   if (with_gpu_emulation) {
++    REXLOG_INFO("Vulkan feature report for '{}': independentBlend={}, fragmentStoresAndAtomics={}, vertexPipelineStoresAndAtomics={}, geometryShader={}, fillModeNonSolid={}",
++                properties.deviceName, bool(supported_features.independentBlend),
++                bool(supported_features.fragmentStoresAndAtomics), bool(supported_features.vertexPipelineStoresAndAtomics),
++                bool(supported_features.geometryShader), bool(supported_features.fillModeNonSolid));
+     if (!supported_features.independentBlend) {
+       // Not trivial to work around:
+       // - Affects not only the blend equation, but also the color write mask.
+@@ -116,7 +120,8 @@
+           properties.deviceName);
+       return nullptr;
+     }
+-    if (!supported_features.vertexPipelineStoresAndAtomics) {
++    if (REXCVAR_GET(vulkan_require_vertex_pipeline_stores_and_atomics) &&
++        !supported_features.vertexPipelineStoresAndAtomics) {
+       REXLOG_WARN(
+           "Vulkan device '{}' doesn't support vertexPipelineStoresAndAtomics, which "
+           "is required for Vulkan GPU emulation parity",
+--- a/src/ui/window_sdl.cpp
++++ b/src/ui/window_sdl.cpp
+@@ -35,6 +35,8 @@
+ #include <SDL3/SDL_metal.h>
+ 
+ #include <rex/ui/surface_mac.h>
++#elif REX_PLATFORM_ANDROID
++#include <rex/ui/surface_android.h>
+ #else
+ #include <X11/Xlib-xcb.h>
+ #include <rex/ui/surface_gnulinux.h>
+@@ -398,6 +400,15 @@
+       SDL_Metal_DestroyView(metal_view);
+     }
+   }
++#elif REX_PLATFORM_ANDROID
++  SDL_PropertiesID props = SDL_GetWindowProperties(sdl_window_);
++  if (allowed_types & Surface::kTypeFlag_AndroidNativeWindow) {
++    auto* native_window = static_cast<ANativeWindow*>(SDL_GetPointerProperty(
++        props, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr));
++    if (native_window) {
++      return std::make_unique<AndroidNativeWindowSurface>(native_window);
++    }
++  }
+ #else
+   SDL_PropertiesID props = SDL_GetWindowProperties(sdl_window_);
+   if (allowed_types & Surface::kTypeFlag_WaylandSurface) {
+--- a/src/ui/windowed_app_context_sdl.cpp
++++ b/src/ui/windowed_app_context_sdl.cpp
+@@ -50,6 +50,11 @@
+   if (!requested_driver.empty()) {
+     SDL_SetHint(SDL_HINT_VIDEO_DRIVER, requested_driver.c_str());
+   }
++#if REX_PLATFORM_ANDROID
++  // This UI loop uses WaitEvent, not a PollEvent drain loop. Poll sentinels
++  // wake the Android lifecycle wait themselves and otherwise create a spin.
++  SDL_SetHint(SDL_HINT_POLL_SENTINEL, "0");
++#endif
+   if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) {
+     REXLOG_ERROR("SDL_InitSubSystem(SDL_INIT_VIDEO) failed: {}", SDL_GetError());
+     return false;
+--- a/src/ui/windowed_app_main_sdl.cpp
++++ b/src/ui/windowed_app_main_sdl.cpp
+@@ -19,6 +19,11 @@
+ #include <rex/cvar.h>
+ #include <rex/logging.h>
+ #include <rex/platform.h>
++#if REX_PLATFORM_ANDROID
++#include <SDL3/SDL_main.h>
++#include <rex/main_android.h>
++#include <rex/thread.h>
++#endif
+ #include <rex/ui/windowed_app.h>
+ #include <rex/ui/windowed_app_context_sdl.h>
+ 
+@@ -34,9 +39,17 @@
+ #include <shellapi.h>
+ #endif
+ 
++#if REX_PLATFORM_ANDROID
++REXCVAR_DEFINE_STRING(android_app, "", "Android", "Registered application identifier");
++#endif
++
+ namespace {
+ 
+ int RunWindowedApp(int argc, char** argv) {
++#if REX_PLATFORM_ANDROID
++  rex::memory::AndroidInitialize();
++  rex::thread::AndroidInitialize();
++#endif
+   auto remaining = rex::cvar::Init(argc, argv);
+   rex::cvar::ApplyEnvironment();
+   rex::InitLoggingEarly();
+@@ -55,7 +68,16 @@
+     }
+ #endif
+ 
+-    std::unique_ptr<rex::ui::WindowedApp> app = rex::ui::GetWindowedAppCreator()(app_context);
++#if XE_UI_WINDOWED_APPS_IN_LIBRARY
++    auto creator = rex::ui::WindowedApp::GetCreator(REXCVAR_GET(android_app));
++    if (!creator) {
++      REXLOG_ERROR("Android application is not registered: {}", REXCVAR_GET(android_app));
++      return EXIT_FAILURE;
++    }
++#else
++    auto creator = rex::ui::GetWindowedAppCreator();
++#endif
++    std::unique_ptr<rex::ui::WindowedApp> app = creator(app_context);
+ 
+     // Match remaining positional args to the app's expected options.
+     const auto& option_names = app->GetPositionalOptions();
+--- a/thirdparty/CMakeLists.txt
++++ b/thirdparty/CMakeLists.txt
+@@ -245,8 +245,13 @@
+ # SDL3 - Cross-platform media layer
+ #=============================================================================
+ set(SDL_INSTALL ON CACHE BOOL "" FORCE)
+-set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+-set(SDL_STATIC ON CACHE BOOL "" FORCE)
++if(ANDROID)
++    set(SDL_SHARED ON CACHE BOOL "" FORCE)
++    set(SDL_STATIC OFF CACHE BOOL "" FORCE)
++else()
++    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
++    set(SDL_STATIC ON CACHE BOOL "" FORCE)
++endif()
+ set(SDL_TEST OFF CACHE BOOL "" FORCE)
+ set(SDL_UNIX_CONSOLE_BUILD ON CACHE BOOL "" FORCE)
+ 
+@@ -290,7 +295,7 @@
+ 
+ # Linux video and audio backends. Both video drivers are always built so the
+ # one in use stays a runtime choice.
+-if(UNIX AND NOT APPLE)
++if(UNIX AND NOT APPLE AND NOT ANDROID)
+     set(SDL_X11               ON  CACHE BOOL "" FORCE)
+     set(SDL_WAYLAND           ON  CACHE BOOL "" FORCE)
+     set(SDL_ALSA              ON  CACHE BOOL "" FORCE)
+--- /dev/null
++++ b/include/rex/main_android.h
+@@ -0,0 +1,6 @@
++#pragma once
++#include <android/api-level.h>
++namespace rex {
++inline int GetAndroidApiLevel() { return android_get_device_api_level(); }
++namespace memory { void AndroidInitialize(); void AndroidShutdown(); }
++}
+--- /dev/null
++++ b/include/rex/ui/surface_android.h
+@@ -0,0 +1,19 @@
++#pragma once
++// Android native-window ownership for the isolated MTR-GWRE2 port.
++#include <android/native_window.h>
++#include <rex/ui/surface.h>
++namespace rex::ui {
++class AndroidNativeWindowSurface : public Surface {
++ public:
++  explicit AndroidNativeWindowSurface(ANativeWindow* window) : window_(window) {
++    ANativeWindow_acquire(window_);
++  }
++  ~AndroidNativeWindowSurface() override { ANativeWindow_release(window_); }
++  TypeIndex GetType() const override { return kTypeIndex_AndroidNativeWindow; }
++  ANativeWindow* window() const { return window_; }
++ protected:
++  bool GetSizeImpl(uint32_t& width, uint32_t& height) const override;
++ private:
++  ANativeWindow* window_;
++};
++}
+--- /dev/null
++++ b/src/ui/surface_android.cpp
+@@ -0,0 +1,9 @@
++#include <rex/ui/surface_android.h>
++namespace rex::ui {
++bool AndroidNativeWindowSurface::GetSizeImpl(uint32_t& width, uint32_t& height) const {
++  int32_t w = ANativeWindow_getWidth(window_), h = ANativeWindow_getHeight(window_);
++  width = w > 0 ? uint32_t(w) : 0;
++  height = h > 0 ? uint32_t(h) : 0;
++  return width && height;
++}
++}
+--- /dev/null
++++ b/src/core/fiber_android.cpp
+@@ -0,0 +1,33 @@
++// Cooperative AArch64 fiber switching for Android, which has no ucontext API.
++#include <rex/thread/fiber.h>
++#include <algorithm>
++#include <cassert>
++#include <cstdlib>
++extern "C" void rex_android_fiber_switch(void* from, const void* to);
++namespace rex::thread {
++thread_local Fiber* Fiber::tls_current_ = nullptr;
++Fiber* Fiber::ConvertCurrentThread() {
++  auto* f = new Fiber(); f->is_thread_fiber_ = true; tls_current_ = f; return f;
++}
++Fiber* Fiber::Create(size_t stack_size, void (*entry)(void*), void* arg) {
++  auto* f = new Fiber(); f->entry_ = entry; f->arg_ = arg;
++  f->stack_.resize(stack_size ? std::max(stack_size, size_t(16384)) : size_t(1024 * 1024));
++  f->context_[11] = reinterpret_cast<uintptr_t>(&Fiber::Trampoline);
++  f->context_[12] = reinterpret_cast<uintptr_t>(f->stack_.data() + f->stack_.size()) & ~uintptr_t(15);
++  uint64_t fpcr, fpsr;
++  asm volatile("mrs %0, fpcr" : "=r"(fpcr));
++  asm volatile("mrs %0, fpsr" : "=r"(fpsr));
++  f->context_[22] = uint32_t(fpcr) | (uint64_t(uint32_t(fpsr)) << 32);
++  return f;
++}
++void Fiber::Trampoline() { auto* f = tls_current_; f->entry_(f->arg_); std::abort(); }
++void Fiber::SwitchTo(Fiber* target) {
++  auto* from = tls_current_; assert(from && target); tls_current_ = target;
++  rex_android_fiber_switch(from->context_, target->context_);
++}
++void Fiber::Destroy() {
++  if (is_thread_fiber_) tls_current_ = nullptr;
++  else assert(this != tls_current_);
++  delete this;
++}
++}
+--- /dev/null
++++ b/src/core/fiber_android_arm64.S
+@@ -0,0 +1,41 @@
++// Preserve AAPCS64 callee-saved registers and floating-point control state.
++.text
++.p2align 2
++.global rex_android_fiber_switch
++.type rex_android_fiber_switch, %function
++rex_android_fiber_switch:
++  stp x19, x20, [x0, #0]
++  stp x21, x22, [x0, #16]
++  stp x23, x24, [x0, #32]
++  stp x25, x26, [x0, #48]
++  stp x27, x28, [x0, #64]
++  stp x29, x30, [x0, #80]
++  mov x9, sp
++  str x9, [x0, #96]
++  stp d8, d9, [x0, #112]
++  stp d10, d11, [x0, #128]
++  stp d12, d13, [x0, #144]
++  stp d14, d15, [x0, #160]
++  mrs x9, fpcr
++  str w9, [x0, #176]
++  mrs x9, fpsr
++  str w9, [x0, #180]
++  ldp x19, x20, [x1, #0]
++  ldp x21, x22, [x1, #16]
++  ldp x23, x24, [x1, #32]
++  ldp x25, x26, [x1, #48]
++  ldp x27, x28, [x1, #64]
++  ldp x29, x30, [x1, #80]
++  ldr x9, [x1, #96]
++  mov sp, x9
++  ldp d8, d9, [x1, #112]
++  ldp d10, d11, [x1, #128]
++  ldp d12, d13, [x1, #144]
++  ldp d14, d15, [x1, #160]
++  ldr w9, [x1, #176]
++  msr fpcr, x9
++  ldr w9, [x1, #180]
++  msr fpsr, x9
++  ret
++.size rex_android_fiber_switch, .-rex_android_fiber_switch
++.section .note.GNU-stack,"",%progbits
+--- /dev/null
++++ b/src/core/filesystem_android.cpp
+@@ -0,0 +1,24 @@
++#include <rex/filesystem.h>
++#include <SDL3/SDL.h>
++#include <jni.h>
++#include <string>
++namespace rex::filesystem {
++int OpenAndroidContentFileDescriptor(const std::string_view uri, const char* mode) {
++  auto* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
++  if (!env || env->PushLocalFrame(8) < 0) return -1;
++  auto activity = static_cast<jobject>(SDL_GetAndroidActivity());
++  int fd = -1;
++  if (activity) {
++    auto cls = env->GetObjectClass(activity);
++    auto method = env->GetMethodID(cls, "openContentFileDescriptor", "(Ljava/lang/String;Ljava/lang/String;)I");
++    if (method) {
++      auto java_uri = env->NewStringUTF(std::string(uri).c_str());
++      auto java_mode = env->NewStringUTF(mode);
++      fd = env->CallIntMethod(activity, method, java_uri, java_mode);
++    }
++  }
++  if (env->ExceptionCheck()) { env->ExceptionClear(); fd = -1; }
++  env->PopLocalFrame(nullptr);
++  return fd;
++}
++}

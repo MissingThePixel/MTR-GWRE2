@@ -57,3 +57,10 @@ The launcher starts the game directly and does not run BAT or PowerShell files.
 - `patches` and `sdk-overrides`: shared runtime and recompiler modifications.
 
 Do not modify original game assets or commit generated game instructions.
+
+## Android
+
+See [android/BUILDING.md](android/BUILDING.md) for the ARM64/Vulkan APK build.
+The Android sources live in android/, share the maintained game manifest and
+profile code, and use separate build directories. Use setup-sdk.ps1 -VulkanOnly
+for the Android host code generator, then scripts/build-android.ps1.

@@ -1,0 +1,28 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'com.missingthepixel.gwre2'
+    compileSdk 35
+    buildFeatures { buildConfig true }
+    defaultConfig {
+        applicationId 'com.missingthepixel.gwre2'
+        minSdk 28
+        targetSdk 35
+        versionCode 6
+        versionName '0.1.0-android'
+        buildConfigField 'boolean', 'MALI_COMPAT', (project.findProperty('maliCompat')?.toString()?.toBoolean() ?: false).toString()
+        buildConfigField 'boolean', 'CRASH_LOGS', (project.findProperty('crashLogs')?.toString()?.toBoolean() ?: false).toString()
+        ndk { abiFilters 'arm64-v8a' }
+    }
+    sourceSets.main.java.srcDirs += '../../thirdparty/rexglue-sdk/thirdparty/sdl3/android-project/app/src/main/java'
+    packaging { jniLibs { useLegacyPackaging = true } }
+    // Retain the local signing certificate used by test APKs so in-place
+    // installation preserves saves. Never commit the private keystore.
+    buildTypes {
+        debug { debuggable true }
+        release {
+            debuggable false
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+}

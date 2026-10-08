@@ -2,7 +2,7 @@
 
 **MissingTheRecompilation: Geometry Wars: Retro Evolved 2**
 
-A Windows PC recompilation of the Xbox 360 game, built with
+A Windows and Android recompilation of the Xbox 360 game, built with
 [ReXGlue](https://github.com/rexglue/rexglue-sdk). Includes 4K rendering,
 native 1080p rendering, controller support and an automatic local save profile.
 The game's original 60 FPS behaviour is preserved.
@@ -20,7 +20,21 @@ and renderer are included; you do not need to install ReXGlue to play.
 Alt+F4 closes the game. The launcher works when started from another folder,
 including through QuiverLauncher. Paths containing spaces are supported.
 
-## Saves and logging
+## Android
+
+Download the [Android APK](https://github.com/MissingThePixel/MTR-GWRE2/releases/tag/android-v0.1.0).
+Open MTR-GWRE2, allow file access and copy your complete extracted game files into
+**GWRE2** in internal shared storage, with `default.xex` directly inside that folder.
+Choose **Open game** and play with your controller.
+
+Android 9 or later, ARM64 and a compatible Vulkan 1.1 GPU are required. Android
+renders at native 1080p with the original 60 FPS behaviour and creates a local
+save profile automatically. Game files are supplied separately. Install updates
+over the existing app to preserve private saves and caches. Release logging is off.
+See [android/README.md](android/README.md) for setup and [android/BUILDING.md](android/BUILDING.md)
+for build instructions.
+
+## Windows saves and logging
 
 A local User profile is created automatically if no save exists. Your scores
 and unlock progress are stored in `userdata`; shader caches are in `cache`.
